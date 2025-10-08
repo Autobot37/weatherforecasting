@@ -68,7 +68,7 @@ class Model(pl.LightningModule):
 
         ###-------- logging --------------------------
         # logs metrics and images at intervals when global step(all batches in all epochs) is multiple of interval
-
+        # or simply log every step and remove the interval condition for validation/test.
         global_step = self.trainer.global_step
         log_interval = int(self.cfg.logging.log_val_all_metrics_n * self.cfg.trainer.total_val_steps)
         if global_step % log_interval == 0:
