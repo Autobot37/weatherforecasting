@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -e
 
-PYTHON_SCRIPT="/home/vatsal/NWM/weatherforecasting/experiments/ae_gan_kl/train.py"
+PYTHON_SCRIPT="/home/vatsal/NWM/weatherforecasting/experiments/ae_v2_2/train_data2.py"
 SUCCESS_MARKER="done"
 RESUME_FLAG="--resume"
-RESUME=true
+RESUME=false
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -28,16 +28,16 @@ run_with_retry() {
             resume_param="$RESUME_FLAG False"
         fi
         
-        echo -e "${CYAN}Command: python $PYTHON_SCRIPT $config_args $resume_param${NC}"
-        
-        if python "$PYTHON_SCRIPT" $config_args $resume_param 2>&1 | tee /tmp/training_output.log; then
+        echo -e "${CYAN}Command: $TASKSET_CMD python $PYTHON_SCRIPT $config_args $resume_param${NC}"
+
+        if $TASKSET_CMD python "$PYTHON_SCRIPT" $config_args $resume_param 2>&1 | tee /tmp/training_output.log; then
             if grep -q "$SUCCESS_MARKER" /tmp/training_output.log; then
                 echo -e "${GREEN}✓ Training completed successfully!${NC}"
                 break
-            # else
-            #     echo -e "${YELLOW}⚠ Training finished but no success marker found. Retrying with resume...${NC}"
-            #     current_resume=true
-            # fi
+            else
+                echo -e "${YELLOW}⚠ Training finished but no success marker found. Retrying with resume...${NC}"
+                current_resume=true
+            fi
         else
             echo -e "${RED}⚠ Training failed. Retrying with resume...${NC}"
             current_resume=true
@@ -47,9 +47,10 @@ run_with_retry() {
     done
 }
 
+TASKSET_CMD="taskset -c 0-8"
+
 declare -a RUNS=(
-    "experiment_name=ae_gan_kl optim.lr=1e-4",
-    "experiment_name=ae_gan_kl_disc_1 lpips.disc_start=0.0 lpips.disc_weight=1.0",
+    project_name=ae_test_v2
 )
 
 for config in "${RUNS[@]}"; do

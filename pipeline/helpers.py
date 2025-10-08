@@ -1,12 +1,12 @@
 import torch
 from collections import OrderedDict
-from termcolor import colored
 from torch_lr_finder import LRFinder, TrainDataLoaderIter, ValDataLoaderIter
 import os
 from pipeline.metrics import calc_metrics
 from pytorch_lightning.loggers import WandbLogger
 import pytorch_lightning as pl
 import wandb
+from termcolor import colored
 import matplotlib.pyplot as plt
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pipeline.datasets.sevir.sevir import vil_cmap
@@ -60,7 +60,7 @@ def lr_range_test(model, optimizer, train_dataloader, val_dataloader, criterion,
     fig.savefig(os.path.join(outputs_path, 'lr_range_test.png'))
     lr_finder.reset()
 
-def adamw_optimizer(model, lr, weight_decay):
+def adamw_optimizer(model, lr, weight_decay, beta1=0.9, beta2=0.999):
     """
     https://towardsdatascience.com/weight-decay-and-its-peculiar-effects-66e0aee3e7b8/
     weight_decay in model architecture testing should be 0 since 
@@ -70,7 +70,8 @@ def adamw_optimizer(model, lr, weight_decay):
     if using another regularization like dropout and data augmentations then still needed 
     since dropout forces more robustness and data augmentations forces invariance.
     """
-    return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay, 
+                             betas=(beta1, beta2))
 
 def cosine_warmup_scheduler(opt, start_lr, final_lr, peak_lr, total_steps, warmup_steps):
     """
@@ -151,20 +152,22 @@ def log_metrics(predictions, targets, tag, pl_module):
     metrics = {f"{tag}_{k}": v for k, v in metrics.items()}
     pl_module.log_dict(metrics, on_step=True, on_epoch=True, sync_dist=True)
 
-def log_wandb_images(predicted, target, label, pl_module):
+def log_wandb_images(predicted, target, label, pl_module, batch_idxs=4):
     """
-    input : predicted, target in B T H W or B T C H W(c==1) [0, 1]
-    output: batch_idx 0 - predicted, target, difference(reds)
+    input : predicted, target in B T H W or B T C H W (c==1) [0, 1]
+    output: Log separate images for first `batch_idxs` samples
     """
     predicted = predicted.detach().cpu()
     target = target.detach().cpu()
 
+    # Check range validity
     in_range = ((target >= 0) & (target <= 1)).sum().item()
     total_elems = target.numel()
     ratio = in_range / total_elems
     if ratio < 0.9:
         print(f"\033[91mtarget data not in [0,1] range: {ratio:.2%}\033[0m")
 
+    # Remove channel dim if present
     if predicted.ndim == 5:
         assert predicted.shape[2] == 1, "Predicted must be (B,T,1,H,W)"
         predicted = predicted.squeeze(2)
@@ -172,46 +175,54 @@ def log_wandb_images(predicted, target, label, pl_module):
         assert target.shape[2] == 1, "Target must be (B,T,1,H,W)"
         target = target.squeeze(2)
 
+    # Clamp batch_idxs to available size
+    batch_idxs = min(batch_idxs, predicted.shape[0])
+
     target_np = (target.clamp(0,1) * 255).numpy().astype('uint8')
     pred_np = (predicted.clamp(0,1) * 255).numpy().astype('uint8')
     diff_np = abs(target_np.astype(float) - pred_np.astype(float)).clip(0,255).astype('uint8')
 
     B, T, H, W = target_np.shape
-    fig, axes = plt.subplots(3, T, figsize=(4*T, 12))
-    if T == 1:
-        axes = axes.reshape(3, 1)
-    
+
     cmap, norm, _, _ = vil_cmap()
 
-    for t in range(T):
-        ax0 = axes[0, t]
-        im0 = ax0.imshow(target_np[0, t], cmap=cmap, norm=norm)
-        ax0.set_title(f'Time {t}: Original')
-        ax0.axis('off')
-        plt.colorbar(im0, ax=ax0, fraction=0.046, pad=0.04)
+    # ---- log each batch as separate figure ----
+    for b in range(batch_idxs):
+        fig, axes = plt.subplots(3, T, figsize=(4*T, 12))
+        if T == 1:
+            axes = axes.reshape(3, 1)
 
-        # Reconstruction
-        ax1 = axes[1, t]
-        im1 = ax1.imshow(pred_np[0, t], cmap=cmap, norm=norm)
-        ax1.set_title(f'Time {t}: Reconstruction')
-        ax1.axis('off')
-        plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+        for t in range(T):
+            # Original
+            ax0 = axes[0, t]
+            im0 = ax0.imshow(target_np[b, t], cmap=cmap, norm=norm)
+            ax0.set_title(f'Batch {b}, Time {t}: Original')
+            ax0.axis('off')
+            plt.colorbar(im0, ax=ax0, fraction=0.046, pad=0.04)
 
-        # Difference
-        ax2 = axes[2, t]
-        im2 = ax2.imshow(diff_np[0, t], cmap='Reds', vmin=0, vmax=255)
-        ax2.set_title(f'Time {t}: Abs Diff')
-        ax2.axis('off')
-        plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+            # Reconstruction
+            ax1 = axes[1, t]
+            im1 = ax1.imshow(pred_np[b, t], cmap=cmap, norm=norm)
+            ax1.set_title(f'Batch {b}, Time {t}: Reconstruction')
+            ax1.axis('off')
+            plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
 
-    plt.tight_layout()
+            # Difference
+            ax2 = axes[2, t]
+            im2 = ax2.imshow(diff_np[b, t], cmap='Reds', vmin=0, vmax=255)
+            ax2.set_title(f'Batch {b}, Time {t}: Abs Diff')
+            ax2.axis('off')
+            plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
 
-    if isinstance(pl_module.logger, WandbLogger):
-        wandb_image = wandb.Image(fig, caption=label)
-        pl_module.logger.experiment.log({label: [wandb_image],
-                                         'global_step': pl_module.global_step})
+        plt.tight_layout()
 
-    plt.close(fig)
+        if isinstance(pl_module.logger, WandbLogger):
+            wandb_image = wandb.Image(fig, caption=f"{label} (batch {b})")
+            pl_module.logger.experiment.log({
+                f"{label}": wandb_image,
+                'global_step': pl_module.global_step
+            })
+        plt.close(fig)
 
 def log_gradients_paramater(model, total_train_steps, wandb_watch_log_freq, logger):
     """
@@ -223,7 +234,6 @@ def log_gradients_paramater(model, total_train_steps, wandb_watch_log_freq, logg
     else:
         print(colored("logger is not a WandbLogger, skipping gradient and parameter logging", 'red'))
 
-#review2
 def modelcheckpointcallback(run_dir, total_train_steps, save_every_n_steps, save_on_train_epoch_end):
     return ModelCheckpoint(
         dirpath = os.path.join(run_dir, 'checkpoints'),
@@ -231,6 +241,7 @@ def modelcheckpointcallback(run_dir, total_train_steps, save_every_n_steps, save
         every_n_train_steps = int(total_train_steps * save_every_n_steps),
         save_on_train_epoch_end = save_on_train_epoch_end,
         save_top_k=-1,  # save all models
+        save_last= True,
     )
 
 class TrackGradNormCallback(pl.Callback):
@@ -255,3 +266,38 @@ def check_yaml(cfg, cli_cfg, path=""):
             raise KeyError(f"Invalid override key: '{full_key}' not found in base config")
         if isinstance(cli_cfg[k], dict) and isinstance(cfg[k], dict):
             check_yaml(cfg[k], cli_cfg[k], full_key)
+
+def find_latest_ckpt(cfg):
+    wandb_dir = os.path.join(cfg.experiment_path, 'outputs', cfg.experiment_name, 'wandb')
+    if not os.path.exists(wandb_dir):
+        return None, None
+
+    # Collect all checkpoint paths with their mtimes and run_ids
+    ckpt_entries = []
+
+    for run_dir in os.listdir(wandb_dir):
+        run_path = os.path.join(wandb_dir, run_dir)
+        ckpt_dir = os.path.join(run_path, 'files/checkpoints')
+
+        if not (run_dir.startswith("run-") and os.path.isdir(ckpt_dir)):
+            continue
+
+        for fname in os.listdir(ckpt_dir):
+            if fname.endswith(".ckpt"):
+                fpath = os.path.join(ckpt_dir, fname)
+                mtime = os.path.getmtime(fpath)
+                run_id = run_dir.split("-")[-1]
+                ckpt_entries.append((mtime, fpath, run_id))
+
+    # Sort by most recent first
+    ckpt_entries.sort(reverse=True)
+
+    # Try loading each checkpoint until one works
+    for _, fpath, run_id in ckpt_entries:
+        try:
+            _ = torch.load(fpath, map_location='cpu')
+            return fpath, run_id
+        except Exception as e:
+            continue  # Try next
+
+    return None, None

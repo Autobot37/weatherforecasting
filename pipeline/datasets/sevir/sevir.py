@@ -1,6 +1,26 @@
-"""Code is adapted from https://github.com/amazon-science/earth-forecasting-transformer/blob/e60ff41c7ad806277edc2a14a7a9f45585997bd7/src/earthformer/datasets/sevir/sevir_dataloader.py."""
+"""
+Code is adapted from https://github.com/amazon-science/earth-forecasting-transformer/blob/e60ff41c7ad806277edc2a14a7a9f45585997bd7/src/earthformer/datasets/sevir/sevir_torch_wrap.py
+Add data augmentation.
+Only return "VIL" data in `torch.Tensor` format instead of `Dict`
+"""
 import os
-from typing import List, Union, Dict, Sequence, Optional, Tuple
+from typing import Union, Dict, Sequence, Tuple, List
+import numpy as np
+import datetime
+import pandas as pd
+import torch
+from torch import nn
+from torch.utils.data import Dataset as TorchDataset, DataLoader, random_split
+from torchvision import transforms
+from einops import rearrange
+from lightning import LightningDataModule, seed_everything
+import os
+from typing import Sequence
+import random
+from torch import nn
+import torchvision.transforms.functional as TF
+import os
+from typing import List, Union, Dict, Sequence
 from math import ceil
 import numpy as np
 import numpy.random as nprand
@@ -10,80 +30,6 @@ import h5py
 import torch
 from torch.nn.functional import avg_pool2d
 from einops import rearrange
-from omegaconf import OmegaConf, DictConfig
-import math
-from matplotlib.colors import ListedColormap
-from matplotlib.patches import Patch
-from matplotlib.font_manager import FontProperties
-import matplotlib.pyplot as plt
-from torch import nn
-from torch.utils.data import Dataset as TorchDataset, DataLoader, random_split
-from torchvision import transforms
-from pytorch_lightning import LightningDataModule, seed_everything
-from copy import deepcopy
-from matplotlib.colors import BoundaryNorm
-import torchvision.transforms.functional as TF
-import random
-from termcolor import colored
-
-class TransformsFixRotation(nn.Module):
-    r"""
-    Rotate by one of the given angles.
-
-    Example: `rotation_transform = MyRotationTransform(angles=[-30, -15, 0, 15, 30])`
-    """
-
-    def __init__(self, angles):
-        super(TransformsFixRotation, self).__init__()
-        if not isinstance(angles, Sequence):
-            angles = [angles, ]
-        self.angles = angles
-
-    def forward(self, x):
-        angle = random.choice(self.angles)
-        return TF.rotate(x, angle)
-
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(angles={self.angles})"
-
-VIL_COLORS = [[0, 0, 0],
-              [0.30196078431372547, 0.30196078431372547, 0.30196078431372547],
-              [0.1568627450980392, 0.7450980392156863, 0.1568627450980392],
-              [0.09803921568627451, 0.5882352941176471, 0.09803921568627451],
-              [0.0392156862745098, 0.4117647058823529, 0.0392156862745098],
-              [0.0392156862745098, 0.29411764705882354, 0.0392156862745098],
-              [0.9607843137254902, 0.9607843137254902, 0.0],
-              [0.9294117647058824, 0.6745098039215687, 0.0],
-              [0.9411764705882353, 0.43137254901960786, 0.0],
-              [0.6274509803921569, 0.0, 0.0],
-              [0.9058823529411765, 0.0, 1.0]]
-
-VIL_LEVELS = [0.0, 16.0, 31.0, 59.0, 74.0, 100.0, 133.0, 160.0, 181.0, 219.0, 255.0]
-
-def vil_cmap(encoded=True):
-    cols = deepcopy(VIL_COLORS)
-    lev = deepcopy(VIL_LEVELS)
-    # Exactly the same error occurs in the original implementation (https://github.com/MIT-AI-Accelerator/neurips-2020-sevir/blob/master/src/display/display.py).
-    # ValueError: There are 10 color bins including extensions, but ncolors = 9; ncolors must equal or exceed the number of bins
-    # We can not replicate the visualization in notebook (https://github.com/MIT-AI-Accelerator/neurips-2020-sevir/blob/master/notebooks/AnalyzeNowcast.ipynb) without error.
-    nil = cols.pop(0)
-    under = cols[0]
-    # over = cols.pop()
-    over = cols[-1]
-    cmap = ListedColormap(cols)
-    cmap.set_bad(nil)
-    cmap.set_under(under)
-    cmap.set_over(over)
-    norm = BoundaryNorm(lev, cmap.N)
-    vmin, vmax = None, None
-    return cmap, norm, vmin, vmax
-
-root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-
-default_exps_dir = os.path.abspath(os.path.join(root_dir, "experiments"))
-
-default_dataset_dir = os.path.abspath(os.path.join(root_dir, "datasets"))
-default_dataset_sevir_dir = os.path.abspath(os.path.join(default_dataset_dir, "sevir"))
 
 
 # SEVIR Dataset constants
@@ -116,18 +62,12 @@ PREPROCESS_OFFSET_01 = {'vis': 0,
                         'vil': 0,  # currently the only one implemented
                         'lght': 0}
 
-HMF_COLORS = np.array([
-    [82, 82, 82],
-    [252, 141, 89],
-    [255, 255, 191],
-    [145, 191, 219]
-]) / 255
-
-THRESHOLDS = (0, 16, 74, 133, 160, 181, 219, 255)
-# sevir
-SEVIR_CATALOG = os.path.join(default_dataset_sevir_dir, "CATALOG.csv")
-SEVIR_DATA_DIR = os.path.join(default_dataset_sevir_dir, "data")
-SEVIR_RAW_SEQ_LEN = 49
+default_dataset_sevir_dir = "/home/vatsal/NWM/sevir_lr"
+default_dataset_sevirlr_dir = "/home/vatsal/NWM/sevir_lr"
+SEVIR_LR_ROOT_DIR = "/home/vatsal/NWM/sevir_lr"
+SEVIR_LR_CATALOG = os.path.join(SEVIR_LR_ROOT_DIR, "CATALOG.csv")
+SEVIR_LR_DATA_DIR = os.path.join(SEVIR_LR_ROOT_DIR, "data")
+SEVIR_LR_RAW_SEQ_LEN = 25
 
 def path_splitall(path):
     allparts = []
@@ -174,7 +114,7 @@ class SEVIRDataLoader:
                                         ...
     """
     def __init__(self,
-                 data_types: Optional[Sequence[str]] = None,
+                 data_types: Sequence[str] = None,
                  seq_len: int = 49,
                  raw_seq_len: int = 49,
                  sample_mode: str = 'sequent',
@@ -184,10 +124,10 @@ class SEVIRDataLoader:
                  num_shard: int = 1,
                  rank: int = 0,
                  split_mode: str = "uneven",
-                 sevir_catalog: Optional[Union[str, pd.DataFrame]] = None,
-                 sevir_data_dir: Optional[str] = None,
-                 start_date: Optional[datetime.datetime] = None,
-                 end_date: Optional[datetime.datetime] = None,
+                 sevir_catalog: Union[str, pd.DataFrame] = None,
+                 sevir_data_dir: str = None,
+                 start_date: datetime.datetime = None,
+                 end_date: datetime.datetime = None,
                  datetime_filter=None,
                  catalog_filter='default',
                  shuffle: bool = False,
@@ -195,7 +135,7 @@ class SEVIRDataLoader:
                  output_type=np.float32,
                  preprocess: bool = True,
                  rescale_method: str = '01',
-                 downsample_dict: Optional[Dict[str, Sequence[int]]] = None,
+                 downsample_dict: Dict[str, Sequence[int]] = None,
                  verbose: bool = False):
         r"""
         Parameters
@@ -324,8 +264,8 @@ class SEVIRDataLoader:
         if self.catalog_filter is not None:
             if self.catalog_filter == 'default':
                 self.catalog_filter = lambda c: c.pct_missing == 0
-            if callable(self.catalog_filter):
-                self.catalog = self.catalog[self.catalog_filter(self.catalog)]
+            self.catalog = self.catalog[self.catalog_filter(self.catalog)]
+
         self._compute_samples()
         self._open_files(verbose=self.verbose)
         self.reset()
@@ -334,9 +274,6 @@ class SEVIRDataLoader:
         """
         Computes the list of samples in catalog to be used. This sets self._samples
         """
-        if self.catalog is None or self.data_types is None:
-            print(colored("Catalog or data_types is None", "red"))
-            return
         # locate all events containing colocated data_types
         imgt = self.data_types
         imgts = set(imgt)
@@ -347,7 +284,6 @@ class SEVIRDataLoader:
         # TODO: is it necessary to keep one of them instead of deleting them all
         filtcat = filtcat.groupby('id').filter(lambda x: x.shape[0]==len(imgt))
         self._samples = filtcat.groupby('id').apply(lambda df: self._df_to_series(df,imgt) )
-        assert self._samples is not None, colored("Samples is None", "red")
         if self.shuffle:
             self.shuffle_samples()
 
@@ -371,9 +307,8 @@ class SEVIRDataLoader:
         """
         imgt = self.data_types
         hdf_filenames = []
-        if self.data_types is not None and self._samples is not None:
-            for t in self.data_types:
-                hdf_filenames += list(np.unique( self._samples[f'{t}_filename'].values ))       
+        for t in imgt:
+            hdf_filenames += list(np.unique( self._samples[f'{t}_filename'].values ))
         self._hdf_files = {}
         for f in hdf_filenames:
             if verbose:
@@ -405,9 +340,7 @@ class SEVIRDataLoader:
         """
         The total number of events in the whole dataset, before split into different shards.
         """
-        if self._samples is not None:
-            return int(self._samples.shape[0])
-        return 0
+        return int(self._samples.shape[0])
 
     @property
     def start_event_idx(self):
@@ -589,7 +522,7 @@ class SEVIRDataLoader:
         """
         self._curr_seq_idx = val
 
-    def reset(self, shuffle: Optional[bool] = None):
+    def reset(self, shuffle: bool = None):
         self.set_curr_event_idx(val=self.start_event_idx)
         self.set_curr_seq_idx(0)
         self._sample_count = 0
@@ -621,54 +554,6 @@ class SEVIRDataLoader:
                 return all_remain_seq < self.batch_size
             else:
                 return all_remain_seq <= 0
-    
-    def read_batch(self, pd_batch):
-        """
-        Vectorized version of _read_data over the whole batch.
-
-        Parameters
-        ----------
-        pd_batch : pd.DataFrame
-            Columns must include for each img type t:
-            - f'{t}_filename'
-            - f'{t}_index'
-            - (optionally) f'{t}_time_index' if needed by your lght→grid binning
-
-        Returns
-        -------
-        data : dict of np.ndarray
-            data[t].shape == (batch_size, H, W, raw_seq_len) for each t.
-        """
-        data = {}
-        # determine all image‑types present
-        imgtyps = {col.split("_")[0]
-                for col in pd_batch.columns
-                if col.endswith("_filename")}
-
-        for t in imgtyps:
-            fn_col = f"{t}_filename"
-            idx_col = f"{t}_index"
-            # group rows by filename so we read each HDF5 once
-            for fname, grp in pd_batch.groupby(fn_col):
-                inds = grp[idx_col].values
-                if t == "lght":
-                    # read all lght frames in one go
-                    raw = self._hdf_files[fname][inds, ...]  # shape (n, ...)
-                    # vectorized binning; _lght_to_grid must accept a stack
-                    print("before _lght_to_grid")
-                    out = self._lght_to_grid(raw)
-                    print("after lght to grid")
-                else:
-                    # for other types, slice directly
-                    out = self._hdf_files[fname][t][inds, :, :, :]
-                # concatenate into data[t]
-                if t in data:
-                    data[t] = np.concatenate((data[t], out), axis=0)
-                else:
-                    data[t] = out
-
-        return data
-
 
     def _load_event_batch(self, event_idx, event_batch_size):
         """
@@ -692,12 +577,9 @@ class SEVIRDataLoader:
             pad_size = event_idx_slice_end - self.end_event_idx
             event_idx_slice_end = self.end_event_idx
         pd_batch = self._samples.iloc[event_idx:event_idx_slice_end]
-        print("iloc complete")
-        # data = {}
-        # for index, row in pd_batch.iterrows():
-        #     data = self._read_data(row, data)
-        data = self.read_batch(pd_batch)
-        print("read_data complete")
+        data = {}
+        for index, row in pd_batch.iterrows():
+            data = self._read_data(row, data)
         if pad_size > 0:
             event_batch = []
             for t in self.data_types:
@@ -808,12 +690,11 @@ class SEVIRDataLoader:
         else:
             raise ValueError(f'Invalid rescale option: {rescale}.')
         if data_types is None:
-            data_types = list(data_dict.keys())
+            data_types = data_dict.keys()
         for key in data_types:
-            if key in data_dict:
-                data = data_dict[key]
-                data = data.float() / scale_dict[key] - offset_dict[key]
-                data_dict[key] = data
+            data = data_dict[key]
+            data = data.float() / scale_dict[key] - offset_dict[key]
+            data_dict[key] = data
         return data_dict
 
     @staticmethod
@@ -823,7 +704,7 @@ class SEVIRDataLoader:
         """
         ret_dict = {}
         if data_types is None:
-            data_types = list(data_dict.keys())
+            data_types = data_dict.keys()
         for key, data in data_dict.items():
             if key in data_types:
                 if isinstance(data, torch.Tensor):
@@ -961,7 +842,7 @@ class SEVIRDataLoader:
             ret_dict["mask"].append(no_pad_flag)
         if all_no_pad_flag:
             # if there is no padded data items at all, set `ret_dict["mask"] = None` for convenience.
-            del ret_dict["mask"]
+            ret_dict["mask"] = None
         # update current idx
         self.set_curr_event_idx(event_idx)
         self.set_curr_seq_idx(seq_idx)
@@ -1025,8 +906,76 @@ class SEVIRDataLoader:
                                                  factors_dict=self.downsample_dict,
                                                  layout=self.layout)
         return ret_dict
+    
+class TransformsFixRotation(nn.Module):
+    r"""
+    Rotate by one of the given angles.
 
-#################################################################################################################################
+    Example: `rotation_transform = MyRotationTransform(angles=[-30, -15, 0, 15, 30])`
+    """
+
+    def __init__(self, angles):
+        super(TransformsFixRotation, self).__init__()
+        if not isinstance(angles, Sequence):
+            angles = [angles, ]
+        self.angles = angles
+
+    def forward(self, x):
+        angle = random.choice(self.angles)
+        return TF.rotate(x, angle)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(angles={self.angles})"
+
+def check_aws():
+    r"""
+    Check if aws cli is installed.
+    """
+    if os.system("which aws") != 0:
+        raise RuntimeError("AWS CLI is not installed! Please install it first. See https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html")
+
+
+def download_SEVIR(save_dir=None):
+    r"""
+    Downloaded dataset is saved in save_dir/sevir
+    """
+
+    check_aws()
+
+    if save_dir is None:
+        save_dir = default_dataset_sevir_dir
+    else:
+        save_dir = os.path.join(save_dir, "sevir")
+    if os.path.exists(save_dir):
+        raise FileExistsError(f"Path to save SEVIR dataset {save_dir} already exists!")
+    else:
+        os.makedirs(save_dir)
+        os.system(f"aws s3 cp --no-sign-request s3://sevir/CATALOG.csv "
+                  f"{os.path.join(save_dir, 'CATALOG.csv')}")
+        os.system(f"aws s3 cp --no-sign-request --recursive s3://sevir/data/vil "
+                  f"{os.path.join(save_dir, 'data', 'vil')}")
+
+
+def download_SEVIRLR(save_dir=None):
+    r"""
+    Downloaded dataset is saved in save_dir/sevirlr
+    """
+    if save_dir is None:
+        save_dir = default_dataset_sevirlr_dir
+    else:
+        save_dir = os.path.join(save_dir, "sevirlr")
+    if os.path.exists(save_dir):
+        raise FileExistsError(f"Path to save SEVIR-LR dataset {save_dir} already exists!")
+    else:
+        os.makedirs(save_dir)
+        os.system(f"wget https://deep-earth.s3.amazonaws.com/datasets/sevir_lr.zip "
+                  f"-P {os.path.abspath(save_dir)}")
+        os.system(f"unzip {os.path.join(save_dir, 'sevir_lr.zip')} "
+                  f"-d {save_dir}")
+        os.system(f"mv {os.path.join(save_dir, 'sevir_lr', '*')} "
+                  f"{save_dir}\n"
+                  f"rm -rf {os.path.join(save_dir, 'sevir_lr')}")
+
 
 class SEVIRTorchDataset(TorchDataset):
 
@@ -1041,10 +990,10 @@ class SEVIRTorchDataset(TorchDataset):
                  stride: int = 12,
                  layout: str = "THWC",
                  split_mode: str = "uneven",
-                 sevir_catalog: Optional[Union[str, pd.DataFrame]] = None,
-                 sevir_data_dir: Optional[str] = None,
-                 start_date: Optional[datetime.datetime] = None,
-                 end_date: Optional[datetime.datetime] = None,
+                 sevir_catalog: Union[str, pd.DataFrame] = None,
+                 sevir_data_dir: str = None,
+                 start_date: datetime.datetime = None,
+                 end_date: datetime.datetime = None,
                  datetime_filter = None,
                  catalog_filter = "default",
                  shuffle: bool = False,
@@ -1120,48 +1069,96 @@ class SEVIRTorchDataset(TorchDataset):
 
 class SEVIRLightningDataModule(LightningDataModule):
 
-    def __init__(self, cfg: DictConfig):
+    def __init__(self,
+                 seq_len: int = 25,
+                 sample_mode: str = "sequent",
+                 stride: int = 12,
+                 layout: str = "NTHWC",
+                 output_type = np.float32,
+                 preprocess: bool = True,
+                 rescale_method: str = "01",
+                 verbose: bool = False,
+                 aug_mode: str = "0",
+                 ret_contiguous: bool = True,
+                 # datamodule_only
+                 dataset_name: str = "sevir",
+                 sevir_dir: str = None,
+                 start_date: Tuple[int] = None,
+                 train_test_split_date: Tuple[int] = (2019, 6, 1),
+                 end_date: Tuple[int] = None,
+                 val_ratio: float = 0.1,
+                 batch_size: int = 1,
+                 num_workers: int = 1,
+                 seed: int = 0,
+                 ):
         super(SEVIRLightningDataModule, self).__init__()
-        self.save_hyperparameters(cfg)
-        self.cfg = cfg
-        self.seq_len = cfg.seq_len
-        self.sample_mode = cfg.sample_mode
-        self.stride = cfg.stride
-        assert cfg.layout[0] == "N"
-        self.layout = cfg.layout.replace("N", "")
-        self.output_type = np.float32
-        self.preprocess = cfg.preprocess
-        self.rescale_method = cfg.rescale_method
-        self.verbose = cfg.get("verbose", False)
-        self.aug_mode = cfg.aug_mode
-        self.ret_contiguous = cfg.ret_contiguous
-        self.batch_size = cfg.batch_size
-        self.num_workers = cfg.num_workers
-        self.seed = cfg.seed
-    
-        self.sevir_dir = cfg.data_dir
-    
-        self.catalog_path = os.path.join(self.sevir_dir, "CATALOG.csv")
-        self.raw_data_dir = os.path.join(self.sevir_dir, "data")
-        self.raw_seq_len = cfg.raw_seq_len
-        self.interval_real_time = cfg.interval_real_time
-        self.img_height = cfg.image_height
-        self.img_width = cfg.image_width
-
+        self.seq_len = seq_len
+        self.sample_mode = sample_mode
+        self.stride = stride
+        assert layout[0] == "N"
+        self.layout = layout.replace("N", "")
+        self.output_type = output_type
+        self.preprocess = preprocess
+        self.rescale_method = rescale_method
+        self.verbose = verbose
+        self.aug_mode = aug_mode
+        self.ret_contiguous = ret_contiguous
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.seed = seed
+        if sevir_dir is not None:
+            sevir_dir = os.path.abspath(sevir_dir)
+        if dataset_name == "sevir":
+            if sevir_dir is None:
+                sevir_dir = default_dataset_sevir_dir
+            catalog_path = os.path.join(sevir_dir, "CATALOG.csv")
+            raw_data_dir = os.path.join(sevir_dir, "data")
+            raw_seq_len = 49
+            interval_real_time = 5
+            img_height = 384
+            img_width = 384
+        elif dataset_name == "sevirlr":
+            if sevir_dir is None:
+                sevir_dir = default_dataset_sevirlr_dir
+            catalog_path = os.path.join(sevir_dir, "CATALOG.csv")
+            raw_data_dir = os.path.join(sevir_dir, "data")
+            raw_seq_len = 25
+            interval_real_time = 10
+            img_height = 128
+            img_width = 128
+        else:
+            raise ValueError(f"Wrong dataset name {dataset_name}. Must be 'sevir' or 'sevirlr'.")
+        self.dataset_name = dataset_name
+        self.sevir_dir = sevir_dir
+        self.catalog_path = catalog_path
+        self.raw_data_dir = raw_data_dir
+        self.raw_seq_len = raw_seq_len
+        self.interval_real_time = interval_real_time
+        self.img_height = img_height
+        self.img_width = img_width
         # train val test split
-        def _parse_date(date_str):
-            if date_str is None:
-                return None
-            return datetime.datetime.strptime(date_str, '%Y-%m-%d')
-        self.start_date = _parse_date(cfg.start_date) \
-            if "start_date" in cfg else None
-        self.train_test_split_date = _parse_date(cfg.train_test_split_date) \
-            if "train_test_split_date" in cfg else None
-        self.end_date = _parse_date(cfg.end_date) \
-            if "end_date" in cfg else None
-        self.val_ratio = cfg.val_ratio
+        self.start_date = datetime.datetime(*start_date) \
+            if start_date is not None else None
+        self.train_test_split_date = datetime.datetime(*train_test_split_date) \
+            if train_test_split_date is not None else None
+        self.end_date = datetime.datetime(*end_date) \
+            if end_date is not None else None
+        self.val_ratio = val_ratio
 
-    def setup(self, stage: Optional[str] = None) -> None:
+    def prepare_data(self) -> None:
+        if os.path.exists(self.sevir_dir):
+            # Further check
+            assert os.path.exists(self.catalog_path), f"CATALOG.csv not found! Should be located at {self.catalog_path}"
+            assert os.path.exists(self.raw_data_dir), f"SEVIR data not found! Should be located at {self.raw_data_dir}"
+        else:
+            if self.dataset_name == "sevir":
+                download_SEVIR(save_dir=os.path.dirname(self.sevir_dir))
+            elif self.dataset_name == "sevirlr":
+                download_SEVIRLR(save_dir=os.path.dirname(self.sevir_dir))
+            else:
+                raise NotImplementedError
+
+    def setup(self, stage = None) -> None:
         seed_everything(seed=self.seed)
         if stage in (None, "fit"):
             sevir_train_val = SEVIRTorchDataset(
@@ -1169,7 +1166,7 @@ class SEVIRLightningDataModule(LightningDataModule):
                 sevir_data_dir=self.raw_data_dir,
                 raw_seq_len=self.raw_seq_len,
                 split_mode="uneven",
-                shuffle=False,
+                shuffle=True,
                 seq_len=self.seq_len,
                 stride=self.stride,
                 sample_mode=self.sample_mode,
@@ -1236,151 +1233,36 @@ class SEVIRLightningDataModule(LightningDataModule):
     def num_test_samples(self):
         return len(self.sevir_test)
 
-    @staticmethod
-    def plot_hit_miss_fa(ax, y_true, y_pred, thres):
-        mask = np.zeros_like(y_true)
-        mask[np.logical_and(y_true >= thres, y_pred >= thres)] = 4
-        mask[np.logical_and(y_true >= thres, y_pred < thres)] = 3
-        mask[np.logical_and(y_true < thres, y_pred >= thres)] = 2
-        mask[np.logical_and(y_true < thres, y_pred < thres)] = 1
-        cmap = ListedColormap(HMF_COLORS)
-        ax.imshow(mask, cmap=cmap)
 
-    @staticmethod
-    def plot_hit_miss_fa_all_thresholds(ax, y_true, y_pred, **unused_kwargs):
-        fig = np.zeros(y_true.shape)
-        y_true_idx = np.searchsorted(THRESHOLDS, y_true)
-        y_pred_idx = np.searchsorted(THRESHOLDS, y_pred)
-        fig[y_true_idx == y_pred_idx] = 4
-        fig[y_true_idx > y_pred_idx] = 3
-        fig[y_true_idx < y_pred_idx] = 2
-        # do not count results in these not challenging areas.
-        fig[np.logical_and(y_true < THRESHOLDS[1], y_pred < THRESHOLDS[1])] = 1
-        cmap = ListedColormap(HMF_COLORS)
-        ax.imshow(fig, cmap=cmap)
+VIL_COLORS = [[0, 0, 0],
+              [0.30196078431372547, 0.30196078431372547, 0.30196078431372547],
+              [0.1568627450980392, 0.7450980392156863, 0.1568627450980392],
+              [0.09803921568627451, 0.5882352941176471, 0.09803921568627451],
+              [0.0392156862745098, 0.4117647058823529, 0.0392156862745098],
+              [0.0392156862745098, 0.29411764705882354, 0.0392156862745098],
+              [0.9607843137254902, 0.9607843137254902, 0.0],
+              [0.9294117647058824, 0.6745098039215687, 0.0],
+              [0.9411764705882353, 0.43137254901960786, 0.0],
+              [0.6274509803921569, 0.0, 0.0],
+              [0.9058823529411765, 0.0, 1.0]]
 
-    @staticmethod
-    def vis_sevir_seq(
-            save_path,
-            seq: Union[np.ndarray, Sequence[np.ndarray]],
-            label: Union[str, Sequence[str]] = "pred",
-            norm: Optional[Dict[str, float]] = None,
-            interval_real_time: float = 10.0,  plot_stride=2,
-            label_rotation=0,
-            label_offset=(-0.06, 0.4),
-            label_avg_int=False,
-            fs=10,
-            max_cols=10, ):
-        """
-        Parameters
-        ----------
-        seq:    Union[np.ndarray, Sequence[np.ndarray]]
-            shape = (T, H, W). Float value 0-1 after `norm`.
-        label:  Union[str, Sequence[str]]
-            label for each sequence.
-        norm:   Union[str, Dict[str, float]]
-            seq_show = seq * norm['scale'] + norm['shift']
-        interval_real_time: float
-            The minutes of each plot interval
-        max_cols: int
-            The maximum number of columns in the figure.
-        """
-
-        def cmap_dict(s):
-            assert s == "vil"
-            return {'cmap': vil_cmap(encoded=True)[0],
-                    'norm': vil_cmap(encoded=True)[1],
-                    'vmin': vil_cmap(encoded=True)[2],
-                    'vmax': vil_cmap(encoded=True)[3]}
-
-        fontproperties = FontProperties()
-        fontproperties.set_family('serif')
-        # font.set_name('Times New Roman')
-        fontproperties.set_size(fs)
-        # font.set_weight("bold")
-
-        if isinstance(seq, Sequence):
-            seq_list = [ele.astype(np.float32) for ele in seq]
-            assert isinstance(label, Sequence) and len(label) == len(seq)
-            label_list = label
-        elif isinstance(seq, np.ndarray):
-            seq_list = [seq.astype(np.float32), ]
-            assert isinstance(label, str)
-            label_list = [label, ]
-        else:
-            raise NotImplementedError
-        if label_avg_int:
-            label_list = [f"{ele1}\nAvgInt = {np.mean(ele2): .3f}"
-                        for ele1, ele2 in zip(label_list, seq_list)]
-        # plot_stride
-        seq_list = [ele[::plot_stride, ...] for ele in seq_list]
-        seq_len_list = [len(ele) for ele in seq_list]
-
-        max_len = max(seq_len_list) if seq_len_list else 0
-
-        max_len = min(max_len, max_cols)
-        seq_list_wrap = []
-        label_list_wrap = []
-        seq_len_list_wrap = []
-        for i, (seq, label, seq_len) in enumerate(zip(seq_list, label_list, seq_len_list)):
-            if max_len > 0:
-                num_row = math.ceil(seq_len / max_len)
-                for j in range(num_row):
-                    slice_end = min(seq_len, (j + 1) * max_len)
-                    seq_list_wrap.append(seq[j * max_len: slice_end])
-                    if j == 0:
-                        label_list_wrap.append(label)
-                    else:
-                        label_list_wrap.append("")
-                    seq_len_list_wrap.append(min(seq_len - j * max_len, max_len))
-
-        if norm is None:
-            norm = {'scale': 255,
-                    'shift': 0}
-        nrows = len(seq_list_wrap)
-        if nrows == 0 or max_len == 0:
-            fig, ax = plt.subplots()
-            plt.close(fig)
-            return
-
-        fig, ax = plt.subplots(nrows=nrows,
-                            ncols=max_len,
-                            figsize=(3 * max_len, 3 * nrows))
-        if nrows == 1:
-            ax = [ax]
-
-        for i, (seq, label, seq_len) in enumerate(zip(seq_list_wrap, label_list_wrap, seq_len_list_wrap)):
-            ax_row = ax[i]
-            if not isinstance(ax_row, np.ndarray):
-                ax_row = [ax_row]
-            ax_row[0].set_ylabel(ylabel=label, fontproperties=fontproperties, rotation=label_rotation)
-            ax_row[0].yaxis.set_label_coords(label_offset[0], label_offset[1])
-            for j in range(0, max_len):
-                if j < seq_len:
-                    x = seq[j] * norm['scale'] + norm['shift']
-                    ax_row[j].imshow(x, **cmap_dict('vil'))
-                    if i == len(seq_list) - 1 and i > 0:  # the last row which is not the `in_seq`.
-                        ax_row[j].set_title(f"Min {int(interval_real_time * (j + 1) * plot_stride)}",
-                                            y=-0.25, fontproperties=fontproperties)
-                else:
-                    ax_row[j].axis('off')
-
-        for i in range(nrows):
-            ax_row = ax[i]
-            if not isinstance(ax_row, np.ndarray):
-                ax_row = [ax_row]
-            for j in range(len(ax_row)):
-                ax_row[j].xaxis.set_ticks([])
-                ax_row[j].yaxis.set_ticks([])
-
-        # Legend of thresholds
-        num_thresh_legend = len(VIL_LEVELS) - 1
-        legend_elements = [Patch(facecolor=VIL_COLORS[i],
-                                label=f'{int(VIL_LEVELS[i - 1])}-{int(VIL_LEVELS[i])}')
-                        for i in range(1, num_thresh_legend + 1)]
-        ax[0][0].legend(handles=legend_elements, loc='center left',
-                        bbox_to_anchor=(-1.2, -0.),
-                        borderaxespad=0, frameon=False, fontsize='10')
-        plt.subplots_adjust(hspace=0.05, wspace=0.05)
-        plt.savefig(save_path)
-        plt.close(fig)
+VIL_LEVELS = [0.0, 16.0, 31.0, 59.0, 74.0, 100.0, 133.0, 160.0, 181.0, 219.0, 255.0]
+from copy import deepcopy
+from matplotlib.colors import ListedColormap, BoundaryNorm
+def vil_cmap(encoded=True):
+    cols = deepcopy(VIL_COLORS)
+    lev = deepcopy(VIL_LEVELS)
+    # Exactly the same error occurs in the original implementation (https://github.com/MIT-AI-Accelerator/neurips-2020-sevir/blob/master/src/display/display.py).
+    # ValueError: There are 10 color bins including extensions, but ncolors = 9; ncolors must equal or exceed the number of bins
+    # We can not replicate the visualization in notebook (https://github.com/MIT-AI-Accelerator/neurips-2020-sevir/blob/master/notebooks/AnalyzeNowcast.ipynb) without error.
+    nil = cols.pop(0)
+    under = cols[0]
+    # over = cols.pop()
+    over = cols[-1]
+    cmap = ListedColormap(cols)
+    cmap.set_bad(nil)
+    cmap.set_under(under)
+    cmap.set_over(over)
+    norm = BoundaryNorm(lev, cmap.N)
+    vmin, vmax = None, None
+    return cmap, norm, vmin, vmax

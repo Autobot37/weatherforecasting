@@ -5,6 +5,13 @@ pipeline/helpers.py
 pipeline/metrics.py
 pipeline/datasets/__init__.py
 pipeline/models/__init__.py
+pipeline/models/ae_16x16x16_lin.py
+pipeline/models/ae_64x16x16.py
+pipeline/models/ae_64x8x8.py
+pipeline/models/ae_64x8x8_lin2.py
+pipeline/models/ae_64x8x8_tf_lin.py
+pipeline/models/ae_64x8x8lin.py
+pipeline/models/ae_tf.py
 pipeline/models/alphapre/__init__.py
 pipeline/models/alphapre/alpha.py
 weatherforecasting.egg-info/PKG-INFO

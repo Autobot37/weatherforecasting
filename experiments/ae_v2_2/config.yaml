@@ -1,0 +1,86 @@
+project_name : "ae_v3"
+experiment_path : "/home/vatsal/NWM/weatherforecasting/experiments/ae_v2_2"
+experiment_name : "ae_2048_disc"
+
+lpips:
+  disc_start: 0.2
+  disc_weight: 1.0
+  #disc opt64
+  disc_beta1: 0.5
+  disc_beta2: 0.9
+  #disc scheduler
+  disc_start_lr: 5e-6
+  disc_peak_lr: 5e-5
+  disc_final_lr: 5e-7
+  disc_warmup_ratio: 0.1
+  #disc architecture
+  disc_in_channels: 1
+  disc_num_layers: 3
+  use_actnorm: false
+  #more losses
+  perceptual_weight: 0.0
+  kl_weight: 0.0
+  logvar_init: 0.0  
+  recon_weight: 1.0
+
+# dataset
+dataset:
+  name: sevirlr
+  seq_len: 1
+  stride: 1
+  batch_size: 8
+  num_workers: 8
+  aug_mode: 1
+
+  input_frames: 0
+  pred_frames: 1
+  image_width: 128
+  image_height: 128
+  channels: 1
+
+# optimizer
+optim:
+  lr : 5e-5
+  weight_decay : 1e-3
+  beta1: 0.5
+  beta2: 0.9
+  gradient_clip_val : 1.0
+
+# lr scheduler
+cosine_warmup:
+  start_lr: 5e-6
+  peak_lr: 5e-5
+  final_lr: 5e-7
+  warmup_ratio: 0.1
+
+one_cycle:
+  peak_lr : 1e-3
+  start_lr: 4e-5
+  final_lr: 4e-7
+  rampup_ratio: 0.3
+
+lr_range_test:
+  max_lr: 1
+  num_iter: 100
+
+# trainer
+trainer:
+  devices: [1]
+  max_epochs: 500
+  accumulate_grad_batches: 1
+  total_train_steps : -1 # need to be set
+  total_val_steps : -1 # need to be set
+  total_test_steps : -1 # need to be set
+  save_every_n_steps: 0.1
+  save_on_train_epoch_end: false
+  limit_train_batches: 0.01
+  limit_val_batches: 0.01
+  limit_test_batches: null
+  log_every_n_steps: 1
+
+# logging
+logging:
+  wandb_watch_log_freq: 0
+  log_train_all_metrics_n : 0.01
+  log_train_plots_n : 0.01
+  log_val_plots_n : 0.01

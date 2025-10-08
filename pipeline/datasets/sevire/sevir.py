@@ -1150,7 +1150,6 @@ class SEVIRTorchDataset(TorchDataset):
             num_workers=num_workers)
         return dataloader
 
-
 def check_aws():
     r"""
     Check if aws cli is installed.

@@ -821,7 +821,7 @@ class Encoder(nn.Module):
         self.down_blocks = nn.ModuleList([])
 
         # down 128 -> 64 -> 16 -> 4 -> 1
-        scales = [2, 4, 4, 4]
+        scales = [2, 2, 2, 2]
 
         output_channel = block_out_channels[0]
         for i, down_block_type in enumerate(down_block_types):
@@ -915,7 +915,7 @@ class Decoder(nn.Module):
         )
 
         # up
-        scales = [4, 4, 4, 2]
+        scales = [2, 2, 2, 2]
 
         reversed_block_out_channels = list(reversed(block_out_channels))
         output_channel = reversed_block_out_channels[0]
@@ -965,6 +965,59 @@ class Decoder(nn.Module):
 
         return sample
 
+import math
+
+class SinusoidalPosEmb2D(nn.Module):
+    def __init__(self, channels: int, height: int, width: int):
+        """
+        Precomputes and adds sinusoidal positional embeddings to input (B, C, H, W).
+        Args:
+            channels (int): number of channels (must be divisible by 4)
+            height (int): fixed height
+            width (int): fixed width
+        """
+        super().__init__()
+        if channels % 4 != 0:
+            raise ValueError("Channels must be divisible by 4 for 2D sinusoidal embeddings.")
+
+        self.channels = channels
+        self.height = height
+        self.width = width
+
+        # Precompute positional embedding and save as buffer
+        pe = self._build_embedding(channels, height, width)
+        self.register_buffer("pe", pe, persistent=False)
+
+    def _build_embedding(self, C, H, W):
+        c_half = C // 2
+        c_quarter = c_half // 2
+
+        inv_freq_y = 1.0 / (10000 ** (torch.arange(0, c_quarter).float() / c_quarter))
+        inv_freq_x = 1.0 / (10000 ** (torch.arange(0, c_quarter).float() / c_quarter))
+
+        pos_y = torch.arange(H).unsqueeze(1).float()  # (H,1)
+        pos_x = torch.arange(W).unsqueeze(1).float()  # (W,1)
+
+        sinusoid_y = pos_y * inv_freq_y.unsqueeze(0)  # (H,Cq)
+        sinusoid_x = pos_x * inv_freq_x.unsqueeze(0)  # (W,Cq)
+
+        y_emb = torch.cat([torch.sin(sinusoid_y), torch.cos(sinusoid_y)], dim=1)  # (H, C/2)
+        y_emb = y_emb.unsqueeze(1).repeat(1, W, 1)  # (H, W, C/2)
+
+        x_emb = torch.cat([torch.sin(sinusoid_x), torch.cos(sinusoid_x)], dim=1)  # (W, C/2)
+        x_emb = x_emb.unsqueeze(0).repeat(H, 1, 1)  # (H, W, C/2)
+
+        emb = torch.cat([y_emb, x_emb], dim=2)  # (H, W, C)
+        emb = emb.permute(2, 0, 1).unsqueeze(0)  # (1, C, H, W)
+        return emb  # broadcast over batch
+
+    def forward(self, x):
+        """
+        Adds precomputed positional embedding.
+        x: (B, C, H, W)
+        """
+        return x + self.pe
+
 class AutoencoderKL(nn.Module):
     r"""Variational Autoencoder (VAE) model with KL loss from the paper Auto-Encoding Variational Bayes by Diederik P. Kingma
     and Max Welling.
@@ -1006,6 +1059,7 @@ class AutoencoderKL(nn.Module):
         norm_num_groups: int = 32,
         sample_size: int = 32,
         scaling_factor: float = 0.18215,
+        timeseries_dim: int = 512,
     ):
         super().__init__()
 
@@ -1036,9 +1090,21 @@ class AutoencoderKL(nn.Module):
         self.post_quant_conv = nn.Conv2d(latent_channels, latent_channels, 1)
         self.use_slicing = False
 
+        self.latent_channels = latent_channels
+        self.latent_height = sample_size // (2 ** len(down_block_types)) * 2
+        self.latent_width = sample_size // (2 ** len(down_block_types)) * 2
+        self.flattened_size = self.latent_channels * self.latent_height * self.latent_width
+        self.pos_emb = SinusoidalPosEmb2D(
+            channels=self.latent_channels,
+            height=self.latent_height,
+            width=self.latent_width)
+
+        self.to_timeseries = nn.Linear(self.flattened_size, timeseries_dim)
+        self.from_timeseries = nn.Linear(timeseries_dim, self.flattened_size)
+
     def encode(self, x: torch.FloatTensor) -> DiagonalGaussianDistribution:
         h = self.encoder(x)
-        moments = self.quant_conv(h)
+        moments = self.quant_conv(h)        
         posterior = DiagonalGaussianDistribution(moments)
         return posterior
 
@@ -1064,6 +1130,7 @@ class AutoencoderKL(nn.Module):
         self.use_slicing = False
 
     def decode(self, z: torch.FloatTensor) -> torch.Tensor:
+        z = z.reshape(z.shape[0], 64, 8, 8)
         if self.use_slicing and z.shape[0] > 1:
             decoded_slices = [self._decode(z_slice) for z_slice in z.split(1)]
             decoded = torch.cat(decoded_slices)
@@ -1071,32 +1138,56 @@ class AutoencoderKL(nn.Module):
             decoded = self._decode(z)
         return decoded
 
-    def forward(
-            self,
-            sample: torch.FloatTensor,
-            sample_posterior: bool = False,
-            return_posterior: bool = False,
-            generator: Optional[torch.Generator] = None,
-        ) -> torch.FloatTensor:
-        r"""
-        Args:
-            sample (`torch.FloatTensor`): Input sample.
-            sample_posterior (`bool`, *optional*, defaults to `False`):
-                Whether to sample from the posterior.
-            return_posterior (`bool`, *optional*, defaults to `False`):
-                Whether or not to return `posterior` along with `dec` for calculating the training loss.
-        """
-        x = sample
-        posterior = self.encode(x)
-        if sample_posterior:
-            z = posterior.sample(generator=generator)
-        else:
-            z = posterior.mode()
-        dec = self.decode(z)
-        if return_posterior:
-            return dec, posterior
-        else:
-            return dec
+    # def forward(
+    #         self,
+    #         sample: torch.FloatTensor,
+    #         sample_posterior: bool = False,
+    #         return_posterior: bool = False,
+    #         generator: Optional[torch.Generator] = None,
+    #     ) -> torch.FloatTensor:
+    #     r"""
+    #     Args:
+    #         sample (`torch.FloatTensor`): Input sample.
+    #         sample_posterior (`bool`, *optional*, defaults to `False`):
+    #             Whether to sample from the posterior.
+    #         return_posterior (`bool`, *optional*, defaults to `False`):
+    #             Whether or not to return `posterior` along with `dec` for calculating the training loss.
+    #     """
+    #     x = sample
+    #     posterior = self.encode(x)
+    #     if sample_posterior:
+    #         z = posterior.sample(generator=generator)
+    #     else:
+    #         z = posterior.mode()
+    #     dec = self.decode(z)
+    #     if return_posterior:
+    #         return dec, posterior
+    #     else:
+    #         return dec
+    def forward(self, sample: torch.FloatTensor, sample_posterior: bool = False):
+        # 1. Encode to 2D latent grid
+        posterior = self.encode(sample)
+        z_2d = posterior.sample() if sample_posterior else posterior.mode()
+        
+        # 2. Add positional embedding
+        z_2d_pos = self.pos_emb(z_2d)
+        
+        # 3. Flatten
+        z_flat = z_2d_pos.view(z_2d_pos.shape[0], -1)
+        
+        # 4. Project to 1D "timeseries" bottleneck
+        z_timeseries = self.to_timeseries(z_flat)
+        
+        # 5. Project back from bottleneck to flattened 2D grid size
+        z_flat_reconstructed = self.from_timeseries(z_timeseries)
+        
+        # 6. Reshape back to 2D grid
+        z_2d_reconstructed = z_flat_reconstructed.view(-1, self.latent_channels, self.latent_height, self.latent_width)
+        
+        # 7. Decode the reconstructed 2D grid
+        reconstruction = self.decode(z_2d_reconstructed)
+        
+        return reconstruction, z_timeseries, posterior
 
 if __name__ == "__main__":
     down_block_types = (
@@ -1113,11 +1204,12 @@ if __name__ == "__main__":
         "UpDecoderBlock2D",
         "UpDecoderBlock2D",
     )
-    model = AutoencoderKL(in_channels=1, out_channels=1, latent_channels=512, block_out_channels=(64, 128, 256, 512, 512), sample_size=128, down_block_types=down_block_types, up_block_types=up_block_types)
+    model = AutoencoderKL(in_channels=1, out_channels=1, latent_channels=64, block_out_channels=(64, 128, 256, 512, 512), sample_size=128, down_block_types=down_block_types, up_block_types=up_block_types, timeseries_dim=2048)
     x = torch.randn(1, 1, 128, 128)
-    output, pos = model(x, return_posterior=True)
+    out, z_t, z = model(x, sample_posterior=True)
+
     params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     params_m = params / 1e6 
     print(f"Model parameters: {params_m:.2f}M")
-    print(output.shape)  # Should be (1, 1, 128, 128)
-    print(pos.mode().shape)  # Should be (1, 512, 4, 4)
+    print(out.shape)  # Should be (1, 1, 128, 128)
+    print(z.shape)  # Should be (1, 64, 8, 8)

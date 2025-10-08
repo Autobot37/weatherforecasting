@@ -173,8 +173,8 @@ class Model(pl.LightningModule):
             decoded_tgt = self.autoencoder.decode(tgt)
             log_metrics(decoded_pred, decoded_tgt, "train", self)
 
-        plot_interval = int(self.cfg.logging.log_train_plots_n * self.cfg.trainer.total_train_steps)
-        if batch_idx % plot_interval == 0:
+        plot_interval = int(self.cfg.logging.log_train_plots_n * self.cfg.trainer.total_val_steps)
+        if (self.current_epoch * self.cfg.trainer.total_val_steps + batch_idx) % plot_interval == 0:
             log_wandb_images(decoded_pred, decoded_tgt, f"Train Reconstruction vs Original_epoch_{self.current_epoch}_batch_{batch_idx}", self)
         return loss
     
@@ -198,8 +198,8 @@ class Model(pl.LightningModule):
 
         log_metrics(decoded_pred, decoded_tgt, "val", self)
 
-        plot_interval = int(self.cfg.logging.log_val_plots_n * self.cfg.trainer.total_val_steps)
-        if batch_idx % plot_interval == 0:
+        plot_interval = int(self.cfg.logging.log_train_plots_n * self.cfg.trainer.total_val_steps)
+        if (self.current_epoch * self.cfg.trainer.total_val_steps + batch_idx) % plot_interval == 0:
             log_wandb_images(decoded_pred, decoded_tgt, f"Reconstruction vs Original_epoch_{self.current_epoch}_batch_{batch_idx}", self)
         return loss
 
@@ -223,8 +223,8 @@ class Model(pl.LightningModule):
 
         log_metrics(decoded_pred, decoded_tgt, "test", self)
 
-        plot_interval = int(self.cfg.logging.log_val_plots_n * self.cfg.trainer.total_val_steps)
-        if batch_idx % plot_interval == 0:
+        plot_interval = int(self.cfg.logging.log_train_plots_n * self.cfg.trainer.total_val_steps)
+        if (self.current_epoch * self.cfg.trainer.total_val_steps + batch_idx) % plot_interval == 0:
             log_wandb_images(decoded_pred, decoded_tgt, f"Reconstruction vs Original_epoch_{self.current_epoch}_batch_{batch_idx}_test", self)
         return loss
         

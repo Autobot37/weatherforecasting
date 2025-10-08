@@ -1,7 +1,6 @@
 *.ckpt
 *.pth
 *.pt
-*.png
 *.log
 *.wandb
 **/outputs/

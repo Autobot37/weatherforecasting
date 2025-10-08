@@ -1,0 +1,102 @@
+project_name : "ae_s2"
+experiment_path : "/home/vatsal/NWM/weatherforecasting/experiments/ae_s2"
+experiment_name : "ae_s2_dlinear"
+
+dlinear:
+  seq_len: 7
+  pred_len: 6
+  individual: True
+  enc_in: 16384 # 48*48*4
+  kernel_size: 3
+
+ae_kl:
+  in_channels: 1
+  out_channels: 1
+  down_block_types: ['DownEncoderBlock2D', 'DownEncoderBlock2D', 'DownEncoderBlock2D', 'DownEncoderBlock2D']
+  up_block_types: ['UpDecoderBlock2D', 'UpDecoderBlock2D', 'UpDecoderBlock2D', 'UpDecoderBlock2D']
+  block_out_channels: [128, 256, 512, 512]  # downsample `len(block_out_channels) - 1` times
+  layers_per_block: 2
+  latent_channels: 64
+  norm_num_groups: 32
+
+lpips:
+  disc_start: 0.4
+  disc_weight: 1.0
+  #disc opt64
+  disc_beta1: 0.5
+  disc_beta2: 0.9
+  #disc scheduler
+  disc_start_lr: 5e-7
+  disc_peak_lr: 5e-6
+  disc_final_lr: 5e-8
+  disc_warmup_ratio: 0.1
+  #disc architecture
+  disc_in_channels: 1
+  disc_num_layers: 3
+  use_actnorm: false
+  #more losses
+  perceptual_weight: 0.0
+  kl_weight: 0.0
+  logvar_init: 0.0  
+  recon_weight: 1.0
+
+# dataset
+dataset:
+  name: sevir_lr
+  seq_len: 13
+  stride: 6
+  batch_size: 8
+  num_workers: 8
+  
+  input_frames: 7
+  pred_frames: 6
+  image_width: 128
+  image_height: 128
+  channels: 1
+
+# optimizer
+optim:
+  lr : 5e-4
+  weight_decay : 1e-3
+  beta1: 0.9
+  beta2: 0.999
+  gradient_clip_val : 1.0
+
+# lr scheduler
+cosine_warmup:
+  start_lr: 5e-5
+  peak_lr: 5e-4
+  final_lr: 5e-6
+  warmup_ratio: 0.1
+
+one_cycle:
+  peak_lr : 1e-3
+  start_lr: 4e-5
+  final_lr: 4e-7
+  rampup_ratio: 0.3
+
+lr_range_test:
+  max_lr: 1
+  num_iter: 100
+
+# trainer
+trainer:
+  devices: [0]
+  max_epochs: 100
+  accumulate_grad_batches: 1
+  total_train_steps : -1 # need to be set
+  total_val_steps : -1 # need to be set
+  total_test_steps : -1 # need to be set
+  save_every_n_steps: 0.1
+  save_on_train_epoch_end: false
+  limit_train_batches: 0.1
+  limit_val_batches: 0.1
+  limit_test_batches: null
+  log_every_n_steps: 1
+
+# logging
+logging:
+  wandb_watch_log_freq: 0
+  log_train_all_metrics_n : 0.01
+  log_train_plots_n : 0.01
+  log_val_plots_n : 0.01

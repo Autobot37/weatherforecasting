@@ -1,9 +1,9 @@
-project_name : "ae_gan_night"
-experiment_name : "ae_attn_512"
+project_name : "ae_test"
+experiment_name : "ae_conv_1024"
 experiment_path : "experiments/ae_gan"
 
 ConvAutoencoder:
-  latent_dim: 512
+  latent_dim: 2048
 ConvAutoencoder2:
   latent_dim: 256
 AttentionChargedAutoencoder:
@@ -13,7 +13,6 @@ model:
   name: "convautoencoder"
 #can be "convautoencoder", "convautoencoder2", "attentionchargedautoencoder"
   
-  
 lpips:
   disc_start: 1.0
   disc_weight: 0.0
@@ -21,6 +20,7 @@ lpips:
   disc_num_layers: 3
   use_actnorm: false
   perceptual_weight: 0.0
+  recon_weight: 1
 
 # dataset
 dataset:
@@ -31,11 +31,11 @@ dataset:
   stride: 1
   layout: "NHWT"
   rescale_method: "01"
-  preprocess: true
+  preprocess: true'
   verbose: false
   aug_mode: "0"
   ret_contiguous: true
-  batch_size: 16
+  batch_size: 8
   num_workers: 8
 
   seed: 0
@@ -53,15 +53,15 @@ dataset:
 
 # optimizer
 optim:
-  lr : 1e-4
-  weight_decay : 1e-3
+  lr : 1e-3
+  weight_decay : 1e-5
   gradient_clip_val : 1.0
 
 # lr scheduler
 cosine_warmup:
-  start_lr: 1e-5
-  peak_lr: 1e-4
-  final_lr: 1e-6
+  start_lr: 1e-4
+  peak_lr: 1e-3
+  final_lr: 1e-4
   warmup_ratio: 0.1
 
 one_cycle:
@@ -76,14 +76,14 @@ lr_range_test:
 
 # trainer
 trainer:
-  devices: [0]
-  max_epochs: 50
+  devices: [1]
+  max_epochs: 100
   accumulate_grad_batches: 1
   total_train_steps : -1 # need to be set
   total_val_steps : -1 # need to be set
   total_test_steps : -1 # need to be set
-  save_every_n_steps: 0.1
-  save_on_train_epoch_end: true
+  save_every_n_steps: 0.5
+  save_on_train_epoch_end: false
   limit_train_batches: 0.1
   limit_val_batches: 0.1
   limit_test_batches: 0.1
@@ -92,6 +92,6 @@ trainer:
 # logging
 logging:
   wandb_watch_log_freq: 0
-  log_train_all_metrics_n : 0.01
+  log_train_all_metrics_n : 0.1
   log_train_plots_n : 0.1
   log_val_plots_n : 0.1

@@ -8,11 +8,14 @@ import pytorch_lightning as pl
 from omegaconf import OmegaConf
 from termcolor import colored
 from pipeline.models.autoencoderkl.losses.contperceptual import adopt_weight, hinge_d_loss, NLayerDiscriminator, weights_init, LPIPS
-from pipeline.datasets.sevire.sevir import SEVIRLightningDataModule
+from pipeline.datasets.sevir.sevir import SEVIRLightningDataModule
 from pytorch_lightning.callbacks import LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
+from pipeline.models.autoencoderkl.custom_akl import AutoencoderKL
 from pipeline.helpers import load_checkpoint_cascast, log_gradients_paramater, modelcheckpointcallback, TrackGradNormCallback \
-    , adamw_optimizer, cosine_warmup_scheduler, log_metrics, log_wandb_images
+    , adamw_optimizer, cosine_warmup_scheduler, log_metrics, log_wandb_images, check_yaml, find_latest_ckpt
+from pytorch_msssim import ssim
+from pipeline.models.ae_64x8x8_lin import PosAwareAE_TF
 """
 384x384
 rec = l1
@@ -20,242 +23,11 @@ L_adv = -mean(D(x^))
 w_adapt = grad(rec)/grad(l_adv) #to balance both losses
 gen_loss = rec + disc_factor * w_adapt * L_adv
 """
-import sys
+os.environ['WANDB_API_KEY'] = '041eda3850f131617ee1d1c9714e6230c6ac4772'    
 
-def override_config(cfg, cli_args):
-    for arg in cli_args:
-        if "=" not in arg:
-            continue
-        keys, value = arg.split("=", 1)
-        keys = keys.split(".")
-        ref = cfg
-        for k in keys[:-1]:
-            ref = ref.setdefault(k, {})
-        # Try to convert value to number/bool if possible
-        if value.lower() == "true":
-            value = True
-        elif value.lower() == "false":
-            value = False
-        else:
-            try: value = eval(value)
-            except: pass
-        ref[keys[-1]] = value
-    return cfg
-os.environ['WANDB_API_KEY'] = '041eda3850f131617ee1d1c9714e6230c6ac4772'
-
-class ResidualBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, stride=1):
-        super().__init__()
-        
-        self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=stride, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_ch)
-        self.act1 = nn.GELU()
-        
-        self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_ch)
-
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_ch != out_ch:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(out_ch)
-            )
-            
-        self.act2 = nn.GELU()
-
-    def forward(self, x):
-        shortcut = self.shortcut(x)
-        
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.act1(out)
-        
-        out = self.conv2(out)
-        out = self.bn2(out)
-        
-        out += shortcut
-        return self.act2(out)
-
-class UpsampleBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, scale_factor):
-        super().__init__()
-        self.upsample = nn.Upsample(scale_factor=scale_factor, mode='nearest')
-        self.resblock = ResidualBlock(in_ch, out_ch, stride=1)
-
-    def forward(self, x):
-        return self.resblock(self.upsample(x))
-
-class ConvAutoencoder(nn.Module):
-    def __init__(self, in_ch=1, latent_dim=1024):
-        super().__init__()
-        
-        # Encoder: 128 → 64 → 32 → 16 → 4 → 1
-        self.enc1 = ResidualBlock(in_ch,   64, stride=2)  # 128 → 64
-        self.enc2 = ResidualBlock(64,     128, stride=2)  # 64 → 32
-        self.enc3 = ResidualBlock(128,    256, stride=2)  # 32 → 16
-        self.enc4 = ResidualBlock(256,    512, stride=4)  # 16 → 4
-        self.enc5 = ResidualBlock(512,   1024, stride=4)  # 4 → 1
-
-        self.flatten = nn.Flatten()                     # (B,1024,1,1) → (B,1024)
-        self.fc_enc = nn.Linear(1024, latent_dim)
-
-        self.fc_dec = nn.Linear(latent_dim, 1024)
-        self.unflatten = nn.Unflatten(1, (1024, 1, 1))   # (B,1024) → (B,1024,1,1)
-        self.dec_init_conv = ResidualBlock(1024, 1024, stride=1)
-
-        # Decoder: 1 → 4 → 16 → 32 → 64 → 128
-        self.dec1 = UpsampleBlock(1024, 512, scale_factor=4)  # 1 → 4
-        self.dec2 = UpsampleBlock(512,  256, scale_factor=4)  # 4 → 16
-        self.dec3 = UpsampleBlock(256,  128, scale_factor=2)  # 16 → 32
-        self.dec4 = UpsampleBlock(128,   64, scale_factor=2)  # 32 → 64
-        
-        self.final_upsample = nn.Upsample(scale_factor=2, mode='nearest') # 64 → 128
-        self.final_conv = nn.Conv2d(64, in_ch, kernel_size=3, stride=1, padding=1)
-
-    def encode(self, x):
-        x = self.enc1(x)
-        x = self.enc2(x)
-        x = self.enc3(x)
-        x = self.enc4(x)
-        x = self.enc5(x)
-        x = self.flatten(x)
-        z = self.fc_enc(x)
-        return z
-
-    def decode(self, z):
-        x = self.fc_dec(z)
-        x = self.unflatten(x)
-        x = self.dec_init_conv(x)
-        x = self.dec1(x)
-        x = self.dec2(x)
-        x = self.dec3(x)
-        x = self.dec4(x)
-        x = self.final_upsample(x)
-        x = self.final_conv(x)
-        return x
-
-    def forward(self, x):
-        z = self.encode(x)
-        reconstruction = self.decode(z)
-        return reconstruction, z
-
-class ConvAutoencoder2(nn.Module):
-    def __init__(self, in_ch=1, latent_dim=256):
-        super().__init__()
-        
-        # Encoder: 128 → 64 → 32 → 16 → 4 → 1
-        self.enc1 = ResidualBlock(in_ch,   64, stride=2)  # 128 → 64
-        self.enc2 = ResidualBlock(64,     128, stride=2)  # 64 → 32
-        self.enc3 = ResidualBlock(128,    256, stride=2)  # 32 → 16
-        self.enc4 = ResidualBlock(256,    512, stride=4)  # 16 → 4
-        self.enc5 = ResidualBlock(512,   512, stride=4)  # 4 → 1
-
-        self.flatten = nn.Flatten()                     # (B,1024,1,1) → (B,1024)
-        self.fc_enc = nn.Linear(512, latent_dim)
-
-        self.fc_dec = nn.Linear(latent_dim, 512)
-        self.unflatten = nn.Unflatten(1, (512, 1, 1))   # (B,1024) → (B,1024,1,1)
-        self.dec_init_conv = ResidualBlock(512, 512, stride=1)
-
-        # Decoder: 1 → 4 → 16 → 32 → 64 → 128
-        self.dec1 = UpsampleBlock(512, 512, scale_factor=4)  # 1 → 4
-        self.dec2 = UpsampleBlock(512,  256, scale_factor=4)  # 4 → 16
-        self.dec3 = UpsampleBlock(256,  128, scale_factor=2)  # 16 → 32
-        self.dec4 = UpsampleBlock(128,   64, scale_factor=2)  # 32 → 64
-        
-        self.final_upsample = nn.Upsample(scale_factor=2, mode='nearest') # 64 → 128
-        self.final_conv = nn.Conv2d(64, in_ch, kernel_size=3, stride=1, padding=1)
-
-    def encode(self, x):
-        x = self.enc1(x)
-        x = self.enc2(x)
-        x = self.enc3(x)
-        x = self.enc4(x)
-        x = self.enc5(x)
-        x = self.flatten(x)
-        z = self.fc_enc(x)
-        return z
-
-    def decode(self, z):
-        x = self.fc_dec(z)
-        x = self.unflatten(x)
-        x = self.dec_init_conv(x)
-        x = self.dec1(x)
-        x = self.dec2(x)
-        x = self.dec3(x)
-        x = self.dec4(x)
-        x = self.final_upsample(x)
-        x = self.final_conv(x)
-        return x
-
-    def forward(self, x):
-        z = self.encode(x)
-        reconstruction = self.decode(z)
-        return reconstruction, z
-
-class AttentionChargedAutoencoder(nn.Module):
-    def __init__(self, in_ch=1, latent_dim=512, initial_res=8, embed_dim=768, num_heads=12, num_layers=6):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.initial_res = initial_res
-        self.embed_dim = embed_dim
-
-        self.enc1 = ResidualBlock(in_ch, 64, stride=2)
-        self.enc2 = ResidualBlock(64, 128, stride=2)
-        self.enc3 = ResidualBlock(128, 256, stride=2)
-        self.enc4 = ResidualBlock(256, 512, stride=4)
-        self.enc5 = ResidualBlock(512, 1024, stride=4)
-
-        self.flatten = nn.Flatten()
-        self.fc_enc = nn.Linear(1024, latent_dim)
-        self.fc_dec = nn.Linear(latent_dim, embed_dim)
-        self.pos_embed = nn.Parameter(torch.randn(1, initial_res * initial_res, embed_dim))
-
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=embed_dim,
-            nhead=num_heads,
-            dim_feedforward=embed_dim * 4,
-            dropout=0.1,
-            activation='gelu',
-            batch_first=True,
-            norm_first=True
-        )
-        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers)
-
-        self.dec1 = UpsampleBlock(embed_dim, 512, 2)
-        self.dec2 = UpsampleBlock(512, 256, 2)
-        self.dec3 = UpsampleBlock(256, 128, 2)
-        self.dec4 = UpsampleBlock(128, 64, 2)
-        self.final_conv = nn.Conv2d(64, in_ch, 3, 1, 1)
-
-    def encode(self, x):
-        x = self.enc1(x)
-        x = self.enc2(x)
-        x = self.enc3(x)
-        x = self.enc4(x)
-        x = self.enc5(x)
-        x = self.flatten(x)
-        return self.fc_enc(x)
-
-    def decode(self, z):
-        b = z.size(0)
-        memory = self.fc_dec(z).unsqueeze(1)
-        queries = self.pos_embed.repeat(b, 1, 1)
-        x = self.transformer_decoder(tgt=queries, memory=memory)
-        h = w = self.initial_res
-        x = x.permute(0, 2, 1).reshape(b, self.embed_dim, h, w)
-        x = self.dec1(x)
-        x = self.dec2(x)
-        x = self.dec3(x)
-        x = self.dec4(x)
-        return self.final_conv(x)
-
-    def forward(self, x):
-        z = self.encode(x)
-        return self.decode(z), z
-    
+  
 class Loss(nn.Module):
-    def __init__(self, disc_start, disc_num_layers=3, disc_in_channels=1, disc_weight=1.0, use_actnorm=False, perceptual_weight=1.0):
+    def __init__(self, disc_start, disc_num_layers=3, disc_in_channels=1, disc_weight=1.0, use_actnorm=False, perceptual_weight=1.0, recon_weight=1.0):
         super().__init__()
         self.disc_start = disc_start
         self.disc_weight = disc_weight
@@ -268,6 +40,7 @@ class Loss(nn.Module):
 
         self.perceptual_loss = LPIPS().eval()
         self.perceptual_weight = perceptual_weight
+        self.recon_weight = recon_weight
 
     def calculate_adaptive_weight(self, rec_loss, disc_loss, last_layer):
         rec_grad = torch.autograd.grad(rec_loss, last_layer, retain_graph=True)[0]
@@ -278,7 +51,7 @@ class Loss(nn.Module):
         return d_weight
 
     def forward(self, inputs, reconstructions, optimizer_idx, last_layer, split, global_step):
-        rec_loss = F.l1_loss(reconstructions, inputs, reduction="mean")
+        rec_loss = self.recon_weight * F.l1_loss(reconstructions, inputs, reduction="mean")
 
         if self.perceptual_weight > 0:
             inputs_rgb = inputs.repeat(1, 3, 1, 1)
@@ -327,15 +100,7 @@ class Model(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters(cfg)
         self.cfg = cfg
-
-        if cfg.model.name == "convautoencoder":
-            self.autoencoder = ConvAutoencoder(latent_dim=cfg.ConvAutoencoder.latent_dim)
-        elif cfg.model.name == "convautoencoder2":
-            self.autoencoder = ConvAutoencoder2(latent_dim=cfg.ConvAutoencoder2.latent_dim)
-        elif cfg.model.name == "attentionchargedautoencoder":
-            self.autoencoder = AttentionChargedAutoencoder(latent_dim=cfg.AttentionChargedAutoencoder.latent_dim)
-        else:
-            raise ValueError(f"Unknown model type: {cfg.model.name}")
+        self.autoencoder = PosAwareAE_TF()
 
         self.loss = Loss(cfg.lpips.disc_start, 
                         disc_num_layers=cfg.lpips.disc_num_layers, 
@@ -343,6 +108,7 @@ class Model(pl.LightningModule):
                         disc_weight=cfg.lpips.disc_weight, 
                         use_actnorm=cfg.lpips.use_actnorm,
                         perceptual_weight=cfg.lpips.perceptual_weight,
+                        recon_weight=cfg.lpips.recon_weight
                         )
         self.input_frames =  cfg.dataset.input_frames
         self.pred_frames = cfg.dataset.pred_frames
@@ -355,13 +121,13 @@ class Model(pl.LightningModule):
         return recon
     
     def get_last_layer(self):
-        return self.autoencoder.final_conv.weight
+        return self.autoencoder.dec[-1].weight
 
     def training_step(self, batch, batch_idx):
         g_opt, d_opt = self.optimizers()
         g_sch, d_sch = self.lr_schedulers()       
 
-        inp = batch['vil'] #[b, c, h, w]
+        inp = batch #[b, c, h, w]
         pred = self(inp)
 
         self.toggle_optimizer(g_opt)
@@ -391,17 +157,18 @@ class Model(pl.LightningModule):
                 d_sch.step()
                 d_opt.zero_grad(set_to_none=True)
             self.untoggle_optimizer(d_opt)
-        
+
         log_interval = int(self.cfg.logging.log_train_all_metrics_n * self.cfg.trainer.total_train_steps)
         if batch_idx % log_interval == 0:
             log_metrics(pred.unsqueeze(2), inp.unsqueeze(2), "train", self)
 
         plot_interval = int(self.cfg.logging.log_train_plots_n * self.cfg.trainer.total_train_steps)
-        if batch_idx % plot_interval == 0:
+        if (self.current_epoch * self.cfg.trainer.total_train_steps + batch_idx) % plot_interval == 0:
             log_wandb_images(pred, inp, f"Train Reconstruction vs Original_epoch_{self.current_epoch}_batch_{batch_idx}", self)
-    
+        return aeloss
+            
     def validation_step(self, batch, batch_idx):
-        inp = batch['vil'] #[b, c, h, w]
+        inp = batch #[b, c, h, w]
         pred = self(inp)
 
         aeloss, log_dict_ae = self.loss(inp, pred, optimizer_idx = 0, last_layer = self.get_last_layer(), split="val", global_step=self.global_step)
@@ -411,12 +178,13 @@ class Model(pl.LightningModule):
         
         log_metrics(pred.unsqueeze(2), inp.unsqueeze(2), "val", self)
 
-        plot_interval = int(self.cfg.logging.log_val_plots_n * self.cfg.trainer.total_val_steps)
-        if batch_idx % plot_interval == 0:
+        plot_interval = int(self.cfg.logging.log_train_plots_n * self.cfg.trainer.total_val_steps)
+        if (self.current_epoch * self.cfg.trainer.total_val_steps + batch_idx) % plot_interval == 0:
             log_wandb_images(pred, inp, f"Val_Reconstruction vs Original_epoch_{self.current_epoch}_batch_{batch_idx}", self)
+        return aeloss
 
     def test_step(self, batch, batch_idx):
-        inp = batch['vil'] #[b, c, h, w]
+        inp = batch #[b, c, h, w]
         pred = self(inp)
         
         aeloss, log_dict_ae = self.loss(inp, pred, optimizer_idx = 0, last_layer = self.get_last_layer(), split="test", global_step=self.global_step)
@@ -426,8 +194,8 @@ class Model(pl.LightningModule):
         
         log_metrics(pred.unsqueeze(2), inp.unsqueeze(2), "test", self)
 
-        plot_interval = int(self.cfg.logging.log_val_plots_n * self.cfg.trainer.total_val_steps)
-        if batch_idx % plot_interval == 0:
+        plot_interval = int(self.cfg.logging.log_train_plots_n * self.cfg.trainer.total_test_steps)
+        if (self.current_epoch * self.cfg.trainer.total_test_steps + batch_idx) % plot_interval == 0:
             log_wandb_images(pred, inp, f"Test_Reconstruction vs Original_epoch_{self.current_epoch}_batch_{batch_idx}_test", self)
         
     def configure_optimizers(self):
@@ -444,34 +212,52 @@ class Model(pl.LightningModule):
                 {"optimizer": opt_ae, "lr_scheduler": {"scheduler": sch_ae, "interval": "step", "frequency": 1}},
                 {"optimizer": opt_disc, "lr_scheduler": {"scheduler": sch_disc, "interval": "step", "frequency": 1}}
             ]
+            
     
 if __name__ == "__main__":
-    # parser = argparse.ArgumentParser()
-    # parser.add_argument("--resume", type=str, default=None)
-    # parser.add_argument("--run_id", type=str, default=None)
-    # args = parser.parse_args()
-    # resume_ckpt = args.resume
-    # run_id = args.run_id
-    # if run_id is not None:
-    #     print(colored(f"Resuming from checkpoint: {resume_ckpt} with run_id: {run_id}", "green"))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--resume", type=bool, default=False, help="Resume training from checkpoint")
+    args, unknown = parser.parse_known_args()
 
     torch.backends.cudnn.benchmark = True 
     torch.set_float32_matmul_precision('high')
 
     config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     cfg = OmegaConf.load(config_path)
-    cli_args = sys.argv[1:]
-    print(cli_args)
-    cfg = override_config(cfg, cli_args)
+
+    cli_cfg = OmegaConf.from_dotlist(unknown)
+    check_yaml(cfg, cli_cfg)
+    cfg = OmegaConf.merge(cfg, cli_cfg)
+
+    if args.resume:
+        ckpt_path, run_id = find_latest_ckpt(cfg)
+        if ckpt_path is None:
+            args.resume = False
+            print(colored("No checkpoint found, starting from scratch.", "yellow"))
+        else:
+            print(colored(f"Resuming from checkpoint: {ckpt_path} with run id {run_id}", "green"))
+
     outputs_path = os.path.join(cfg.experiment_path, 'outputs')
     os.makedirs(outputs_path, exist_ok=True)
 
-    dm = SEVIRLightningDataModule(dataset_name="sevir_lr", num_workers=8, batch_size=8, seq_len=1, stride=1, layout='NTHW')
-    dm.setup()
+    dm = SEVIRLightningDataModule(
+        dataset_name=cfg.dataset.name,
+        num_workers=cfg.dataset.num_workers,
+        batch_size=cfg.dataset.batch_size,
+        seq_len=cfg.dataset.seq_len,
+        stride=cfg.dataset.stride,
+        layout='NTHW',
+        aug_mode=str(cfg.dataset.aug_mode),
+        val_ratio=0.1,
+        ret_contiguous=False,
+    )
     dm.prepare_data()    
-    for loader in [dm.train_dataloader(), dm.val_dataloader()]:
+    dm.setup()
+
+    for loader in [dm.train_dataloader(), dm.val_dataloader(), dm.test_dataloader()]:
+        print(colored(f"Number of batches in dataloader: {len(loader)}", "cyan"))
         for data in loader:
-            print(f"Data shape: {data['vil'].shape}")
+            print(f"Data shape: {data.shape}")
             break
 
     total_train_steps = (len(dm.train_dataloader()) * cfg.trainer.max_epochs) / cfg.trainer.accumulate_grad_batches
@@ -488,7 +274,9 @@ if __name__ == "__main__":
         cfg.trainer.total_test_steps = total_test_steps * cfg.trainer.limit_test_batches
     cfg.lpips.disc_start = int(cfg.lpips.disc_start * cfg.trainer.total_train_steps)
 
-    logger = WandbLogger(project = cfg.project_name, name = cfg.experiment_name, save_dir = os.path.join(cfg.experiment_path, 'outputs'), resume = "allow")
+    exp_name = cfg.experiment_name
+    save_dir = os.path.join(cfg.experiment_path, 'outputs', exp_name)
+    logger = WandbLogger(project = cfg.project_name, name = cfg.experiment_name, save_dir = save_dir, resume = "allow", id = run_id if args.resume else None)
     run_id = logger.experiment.id
     run_dir = logger.experiment.dir
     artifact = wandb.Artifact(cfg.experiment_name, type="code")
@@ -512,5 +300,5 @@ if __name__ == "__main__":
     )
 
     model = Model(cfg)
-    trainer.fit(model, dm)
+    trainer.fit(model, train_dataloaders=dm.train_dataloader(), val_dataloaders=dm.val_dataloader(), ckpt_path=ckpt_path if args.resume else None)
     print("done")
