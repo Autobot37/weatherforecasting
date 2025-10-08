@@ -223,14 +223,16 @@ def log_gradients_paramater(model, total_train_steps, wandb_watch_log_freq, logg
     else:
         print(colored("logger is not a WandbLogger, skipping gradient and parameter logging", 'red'))
 
+#review2
 def modelcheckpointcallback(run_dir, total_train_steps, save_every_n_steps, save_on_train_epoch_end):
     return ModelCheckpoint(
         dirpath = os.path.join(run_dir, 'checkpoints'),
         filename = "{epoch}-{step:06d}",
         every_n_train_steps = int(total_train_steps * save_every_n_steps),
         save_on_train_epoch_end = save_on_train_epoch_end,
-        save_top_k=-1,
+        save_top_k=-1,  # save all models
     )
+
 class TrackGradNormCallback(pl.Callback):
     def __init__(self, norm_type=2):
         super().__init__()

@@ -221,20 +221,23 @@ class Model(pl.LightningModule):
         if batch_idx % plot_interval == 0:
             log_wandb_images(pred, inp, f"Test_Reconstruction vs Original_epoch_{self.current_epoch}_batch_{batch_idx}_test", self)
         
-    def configure_optimizers(self):
-        opt_ae = adamw_optimizer(self.autoencoder, self.cfg.optim.lr, self.cfg.optim.weight_decay)
-        sch_params = self.cfg.cosine_warmup
-        warmup_steps = sch_params.warmup_ratio * self.total_steps
-        sch_ae = cosine_warmup_scheduler(opt_ae, sch_params.start_lr, sch_params.final_lr, sch_params.peak_lr, self.total_steps, warmup_steps)
+    def configure_optimizers(self, stage = 1):
+        if stage == 1:
+            opt_ae = adamw_optimizer(self.autoencoder, self.cfg.optim.lr, self.cfg.optim.weight_decay)
+            sch_params = self.cfg.cosine_warmup
+            warmup_steps = sch_params.warmup_ratio * self.total_steps
+            sch_ae = cosine_warmup_scheduler(opt_ae, sch_params.start_lr, sch_params.final_lr, sch_params.peak_lr, self.total_steps, warmup_steps)
 
-        opt_disc = adamw_optimizer(self.loss.discriminator, self.cfg.optim.lr, self.cfg.optim.weight_decay)
-        sch_params = self.cfg.cosine_warmup
-        warmup_steps = sch_params.warmup_ratio * self.total_steps
-        sch_disc = cosine_warmup_scheduler(opt_disc, sch_params.start_lr, sch_params.final_lr, sch_params.peak_lr, self.total_steps, warmup_steps)
-        return [
-                {"optimizer": opt_ae, "lr_scheduler": {"scheduler": sch_ae, "interval": "step", "frequency": 1}},
-                {"optimizer": opt_disc, "lr_scheduler": {"scheduler": sch_disc, "interval": "step", "frequency": 1}}
-            ]
+            opt_disc = adamw_optimizer(self.loss.discriminator, self.cfg.optim.lr, self.cfg.optim.weight_decay)
+            sch_params = self.cfg.cosine_warmup
+            warmup_steps = sch_params.warmup_ratio * self.total_steps
+            sch_disc = cosine_warmup_scheduler(opt_disc, sch_params.start_lr, sch_params.final_lr, sch_params.peak_lr, self.total_steps, warmup_steps)
+            return [
+                    {"optimizer": opt_ae, "lr_scheduler": {"scheduler": sch_ae, "interval": "step", "frequency": 1}},
+                    {"optimizer": opt_disc, "lr_scheduler": {"scheduler": sch_disc, "interval": "step", "frequency": 1}}
+                ]
+        else:
+            raise ValueError(f"Invalid stage {stage} for configure_optimizers. Expected 1.")
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -311,8 +314,9 @@ if __name__ == "__main__":
         cfg.trainer.total_val_steps = total_val_steps * cfg.trainer.limit_val_batches
     if cfg.trainer.limit_test_batches is not None:
         cfg.trainer.total_test_steps = total_test_steps * cfg.trainer.limit_test_batches
-    cfg.lpips.disc_start = int(cfg.lpips.disc_start * cfg.trainer.total_train_steps)
 
+
+    cfg.lpips.disc_start = int(cfg.lpips.disc_start * cfg.trainer.total_train_steps)
     exp_name = cfg.experiment_name
     save_dir = os.path.join(cfg.experiment_path, 'outputs', exp_name)
     logger = WandbLogger(project = cfg.project_name, name = cfg.experiment_name, save_dir = save_dir, resume = "allow", id = run_id if args.resume else None)
@@ -332,6 +336,7 @@ if __name__ == "__main__":
         strategy="auto",
         callbacks=[checkpoint_callback, lr_monitor_callback, TrackGradNormCallback()],
         logger=logger,
+        precision = 
         limit_train_batches=cfg.trainer.limit_train_batches,
         limit_val_batches=cfg.trainer.limit_val_batches,
         limit_test_batches=cfg.trainer.limit_test_batches,

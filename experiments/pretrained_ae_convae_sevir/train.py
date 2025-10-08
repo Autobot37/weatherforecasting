@@ -169,8 +169,8 @@ class Model(pl.LightningModule):
 
         log_interval = int(self.cfg.logging.log_train_all_metrics_n * self.cfg.trainer.total_train_steps)
         if batch_idx % log_interval == 0:
-            decoded_pred = self.autoencoder.decode(encoded_pred)
-            log_metrics(decoded_pred, inp, "train", self)
+        decoded_pred = self.autoencoder.decode(encoded_pred)
+        log_metrics(decoded_pred, inp, "train", self)
 
         plot_interval = int(self.cfg.logging.log_train_plots_n * self.cfg.trainer.total_train_steps)
         if batch_idx % plot_interval == 0:
@@ -184,7 +184,7 @@ class Model(pl.LightningModule):
         
         encoded_pred = self(encoded_inp)
         loss = self.criterion(encoded_pred, encoded_inp)
-        self.log('val_loss', loss, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True)
+        self.log('val_loss', loss, prog_bar=True, on_step=True, on_epoch=True, sync_dist=True) #10 epochs 10 batches , 100, 10
 
         log_interval = int(self.cfg.logging.log_val_all_metrics_n * self.cfg.trainer.total_val_steps)
         if batch_idx % log_interval == 0:

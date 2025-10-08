@@ -1,0 +1,66 @@
+project_name : "ae_gan_night" #wandb project name
+experiment_path : "/home/vatsal/NWM/weatherforecasting/experiments/ae_gan_kl"
+experiment_name : "ae_test" #wandb directory name
+
+### model specific config
+model:
+  name: "ae_kl"
+
+# dataset specific config
+dataset:
+  name: sevir_lr
+  seq_len: 1
+  stride: 1
+  batch_size: 16
+  num_workers: 8
+
+  input_frames: 0
+  pred_frames: 1
+  image_width: 128
+  image_height: 128
+  channels: 1
+
+# optimizer
+optim:
+  lr : 1e-4
+  weight_decay : 1e-3
+  gradient_clip_val : 1.0
+
+# lr scheduler
+cosine_warmup:
+  start_lr: 1e-5
+  peak_lr: 1e-4
+  final_lr: 1e-6
+  warmup_ratio: 0.1
+
+one_cycle:
+  peak_lr : 1e-3
+  start_lr: 4e-5
+  final_lr: 4e-7
+  rampup_ratio: 0.3
+
+lr_range_test:
+  max_lr: 1
+  num_iter: 100
+
+# trainer
+trainer:
+  devices: [1] # list of gpus eg [0,1,2,3] or single gpu [0]
+  max_epochs: 1
+  accumulate_grad_batches: 1
+  total_train_steps : -1 # will be set automatically in train.py
+  total_val_steps : -1 # will be set automatically in train.py
+  total_test_steps : -1 # will be set automatically in train.py
+  save_every_n_steps: 0.01 # save every n% of total steps of all epochs
+  save_on_train_epoch_end: true # whether to save checkpoint at end of training epoch
+  limit_train_batches: 0.1 # uses only 0.1 of total training batches
+  limit_val_batches: 0.1 # uses only 0.1 of total validation batches
+  limit_test_batches: 0.1 # uses only 0.1 of total test batches
+  log_every_n_steps: 1 # 1 means it will check for logging every step if some data have to be logged
+
+# logging
+logging:
+  wandb_watch_log_freq: 0 # log gradients and model parameters to wandb every n steps, 0 means don't log
+  log_train_all_metrics_n : 0.01 # log train metrics every n% of total steps of all epochs
+  log_train_plots_n : 0.01 # log train plots every n% of total steps of all epochs
+  log_val_plots_n : 0.01 # log val plots every n% of total steps of all epochs
